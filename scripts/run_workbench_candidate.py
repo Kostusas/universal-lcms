@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +26,9 @@ from survey_qc_files import survey_file
 DEFAULT_MANIFEST = ROOT / "notes" / "metabolomics_workbench_candidate_manifest.json"
 DEFAULT_DOWNLOAD_DIR = Path("/tmp") / f"universal-lcms-workbench-downloads-{os.environ.get('USER', 'user')}"
 DEFAULT_OUTPUT_DIR = Path.home() / "universal-lcms-workbench-runs"
+DEFAULT_DOWNLOAD_RETRIES = 6
+DEFAULT_DOWNLOAD_RETRY_BASE_SECONDS = 5.0
+RETRYABLE_HTTP_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _now_utc() -> str:
@@ -65,11 +71,23 @@ def _output_basename(index: int, candidate: dict) -> str:
     return f"{index:03d}_{_slugify(candidate['study_id'])}_{_slugify(candidate['label'])}.json"
 
 
+def _retry_delay_seconds(base_seconds: float, attempt: int) -> float:
+    return base_seconds * (2 ** (attempt - 1)) + random.uniform(0.0, base_seconds)
+
+
+def _is_retryable_download_error(exc: Exception) -> bool:
+    if isinstance(exc, HTTPError):
+        return exc.code in RETRYABLE_HTTP_STATUS_CODES
+    return isinstance(exc, (URLError, TimeoutError, OSError))
+
+
 def _download_candidate(
     candidate: dict,
     download_dir: Path,
     *,
     overwrite: bool,
+    max_attempts: int,
+    retry_base_seconds: float,
 ) -> dict:
     download_dir.mkdir(parents=True, exist_ok=True)
     out_path = download_dir / _download_basename(candidate)
@@ -97,12 +115,34 @@ def _download_candidate(
         headers={"User-Agent": "universal-lcms-workbench-runner/1.0"},
     )
 
-    with urlopen(request, timeout=300) as response, tmp_path.open("wb") as handle:
-        while True:
-            chunk = response.read(1 << 20)
-            if not chunk:
-                break
-            handle.write(chunk)
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        tmp_path.unlink(missing_ok=True)
+        try:
+            with urlopen(request, timeout=300) as response, tmp_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            break
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
+            last_error = exc
+            if attempt >= max_attempts or not _is_retryable_download_error(exc):
+                raise
+            delay_seconds = _retry_delay_seconds(retry_base_seconds, attempt)
+            print(
+                f"[download retry {attempt}/{max_attempts}] "
+                f"{candidate['label']} failed with {type(exc).__name__}: {exc}. "
+                f"Retrying in {delay_seconds:.1f}s...",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay_seconds)
+
+    if last_error is not None and not tmp_path.exists() and not out_path.exists():
+        raise RuntimeError(f"Download failed for {candidate['label']}") from last_error
 
     actual_size = int(tmp_path.stat().st_size)
     if expected_size and actual_size != expected_size:
@@ -130,6 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--index", type=int, required=True, help="Zero-based candidate index within the selected group.")
     parser.add_argument("--download-dir", type=Path, default=DEFAULT_DOWNLOAD_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--download-retries", type=int, default=DEFAULT_DOWNLOAD_RETRIES)
+    parser.add_argument("--download-retry-base-seconds", type=float, default=DEFAULT_DOWNLOAD_RETRY_BASE_SECONDS)
     parser.add_argument("--overwrite-download", action="store_true")
     parser.add_argument("--overwrite-output", action="store_true")
     parser.add_argument("--no-fit", action="store_true")
@@ -171,6 +213,8 @@ def main() -> None:
         candidate,
         args.download_dir.resolve(),
         overwrite=bool(args.overwrite_download),
+        max_attempts=max(1, int(args.download_retries)),
+        retry_base_seconds=max(0.0, float(args.download_retry_base_seconds)),
     )
 
     survey = survey_file(
