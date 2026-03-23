@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lcms-uv"
+version = "0.1.0"
+description = "Minimal LC-MS variance model and unit-variance transform estimator for mzML/mzXML."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pyteomics>=4.7",
+  "lxml>=5",
+]
+
+[project.scripts]
+lcms-uv = "lcms_uv.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lcms_uv"]
