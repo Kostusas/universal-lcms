@@ -6,7 +6,12 @@ from pathlib import Path
 import numpy as np
 
 from .tracks import DEFAULT_MZ_BIN_WIDTH, DEFAULT_MZ_TOLERANCE_PPM, extract_sparse_tracks
-from .variance import collect_centered_d2_pairs, fit_quadratic_variance
+from .variance import (
+    collect_centered_d2_pairs,
+    fit_quadratic_variance,
+    fit_quadratic_variance_with_isotonic_pilot,
+    quadratic_variance_model,
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,7 @@ def estimate_vst_from_file(
     same_scan_aggregation: str = "max",
     calibrate_unit_variance: bool = True,
     mz_tolerance_ppm: float = DEFAULT_MZ_TOLERANCE_PPM,
+    fit_method: str = "isotonic_pilot",
 ) -> tuple[VarianceFit, dict]:
     """Estimate the variance model and calibrated VST directly from one LC-MS file."""
     tracks, n_scans = extract_sparse_tracks(
@@ -116,7 +122,13 @@ def estimate_vst_from_file(
     if x.size == 0:
         raise RuntimeError("No centered rank-2 pairs found; relax segment thresholds.")
 
-    coef, diag = fit_quadratic_variance(x=x, v=v)
+    if fit_method == "isotonic_pilot":
+        coef, diag = fit_quadratic_variance_with_isotonic_pilot(x=x, v=v)
+    elif fit_method == "irls":
+        coef, diag = fit_quadratic_variance(x=x, v=v)
+    else:
+        raise ValueError(f"Unsupported fit_method: {fit_method}")
+
     sigma0_sq = float(coef[0])
     alpha = float(coef[1])
     beta = float(coef[2])
@@ -148,21 +160,37 @@ def estimate_vst_from_file(
         n_fit_points=int(diag["n_points_used"]),
     )
 
+    pred = quadratic_variance_model(x, coef)
+    ratio = pred / v
+
     diagnostics = {
+        "fit_method": fit_method,
         "relative_rmse": diag["relative_rmse"],
-        "mean_abs_rel_error": diag["mean_abs_rel_error"],
+        "mean_abs_rel_error": diag.get("mean_abs_rel_error"),
+        "mean_abs_scaled_error": diag.get("mean_abs_scaled_error"),
         "n_fit_points": int(diag["n_points_used"]),
         "n_points_used": int(diag["n_points_used"]),
         "fit_min_signal": diag["fit_min_signal"],
         "fit_min_variance": diag["fit_min_variance"],
         "n_points_excluded": int(diag["n_points_excluded"]),
         "fit_weight_scheme": diag["fit_weight_scheme"],
-        "fit_model_floor": diag["fit_model_floor"],
-        "fit_irls_iterations": int(diag["fit_irls_iterations"]),
-        "fit_irls_converged": bool(diag["fit_irls_converged"]),
+        "fit_model_floor": diag.get("fit_model_floor"),
+        "fit_pilot_floor": diag.get("fit_pilot_floor"),
+        "fit_irls_iterations": (
+            int(diag["fit_irls_iterations"]) if diag.get("fit_irls_iterations") is not None else None
+        ),
+        "fit_irls_converged": (
+            bool(diag["fit_irls_converged"]) if diag.get("fit_irls_converged") is not None else None
+        ),
         "n_pairs": int(x.size),
         "mz_bin_width_da": float(mz_bin_width),
         "mz_tolerance_ppm": float(mz_tolerance_ppm),
+        "median_pred_over_v": float(np.median(ratio)),
+        "p90_pred_over_v": float(np.quantile(ratio, 0.9)),
+        "p99_pred_over_v": float(np.quantile(ratio, 0.99)),
+        "fraction_pred_gt_v": float(np.mean(pred > v)),
+        "fraction_pred_gt_10x_v": float(np.mean(pred > 10.0 * v)),
+        "fraction_pred_gt_100x_v": float(np.mean(pred > 100.0 * v)),
     }
     diagnostics.update(unit_meta)
     return fit, diagnostics

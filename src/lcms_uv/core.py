@@ -13,7 +13,10 @@ from .variance import (
     FIT_MIN_SIGNAL,
     FIT_MIN_VARIANCE,
     collect_centered_d2_pairs,
+    estimate_isotonic_pilot_variance,
     fit_quadratic_variance,
+    fit_quadratic_variance_with_isotonic_pilot,
+    fit_quadratic_variance_with_pilot,
     quadratic_variance_model,
 )
 from .vst import VarianceFit, estimate_unit_scale, estimate_vst_from_file, quadratic_vst, unit_variance_vst
@@ -30,7 +33,10 @@ __all__ = [
     "extract_sparse_tracks",
     "split_consecutive_segments",
     "collect_centered_d2_pairs",
+    "estimate_isotonic_pilot_variance",
     "fit_quadratic_variance",
+    "fit_quadratic_variance_with_pilot",
+    "fit_quadratic_variance_with_isotonic_pilot",
     "quadratic_variance_model",
     "quadratic_vst",
     "unit_variance_vst",

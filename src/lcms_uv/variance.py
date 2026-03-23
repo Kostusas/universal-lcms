@@ -11,6 +11,147 @@ FIT_IRLS_MAX_ITERS = 25
 FIT_IRLS_RTOL = 1e-6
 
 
+def _pava_non_decreasing(y: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Return the weighted nondecreasing isotonic fit via PAVA."""
+    n = int(y.size)
+    if n == 0:
+        return np.array([], dtype=float)
+
+    level = np.empty(n, dtype=float)
+    weight = np.empty(n, dtype=float)
+    start = np.empty(n, dtype=int)
+    end = np.empty(n, dtype=int)
+
+    n_blocks = 0
+    for idx in range(n):
+        level[n_blocks] = float(y[idx])
+        weight[n_blocks] = float(w[idx])
+        start[n_blocks] = idx
+        end[n_blocks] = idx
+        n_blocks += 1
+
+        while n_blocks >= 2 and level[n_blocks - 2] > level[n_blocks - 1]:
+            merged_weight = weight[n_blocks - 2] + weight[n_blocks - 1]
+            merged_level = (
+                weight[n_blocks - 2] * level[n_blocks - 2]
+                + weight[n_blocks - 1] * level[n_blocks - 1]
+            ) / merged_weight
+            level[n_blocks - 2] = merged_level
+            weight[n_blocks - 2] = merged_weight
+            end[n_blocks - 2] = end[n_blocks - 1]
+            n_blocks -= 1
+
+    fitted = np.empty(n, dtype=float)
+    for block_idx in range(n_blocks):
+        fitted[start[block_idx] : end[block_idx] + 1] = level[block_idx]
+    return fitted
+
+
+def estimate_isotonic_pilot_variance(
+    x: np.ndarray,
+    v: np.ndarray,
+) -> np.ndarray:
+    """Estimate a monotone pointwise pilot variance from positive `(x, v)` pairs.
+
+    The pilot is the isotonic regression fit of `log(v)` on `log(x)`, evaluated
+    pointwise and returned on the original variance scale. Invalid inputs
+    (`NaN`, `inf`, `x <= 0`, or `v <= 0`) receive `NaN` in the output.
+    """
+    x_arr = np.asarray(x, dtype=float)
+    v_arr = np.asarray(v, dtype=float)
+    if x_arr.shape != v_arr.shape:
+        raise ValueError("`x` and `v` must have the same shape.")
+
+    x_flat = x_arr.ravel()
+    v_flat = v_arr.ravel()
+    pilot_flat = np.full(x_flat.shape, np.nan, dtype=float)
+
+    valid = np.isfinite(x_flat) & np.isfinite(v_flat) & (x_flat > 0.0) & (v_flat > 0.0)
+    if not np.any(valid):
+        return pilot_flat.reshape(x_arr.shape)
+
+    lx = np.log(x_flat[valid])
+    lv = np.log(v_flat[valid])
+    order = np.argsort(lx, kind="mergesort")
+    lx_sorted = lx[order]
+    lv_sorted = lv[order]
+
+    _, start_idx, counts = np.unique(
+        lx_sorted,
+        return_index=True,
+        return_counts=True,
+    )
+    summed_lv = np.add.reduceat(lv_sorted, start_idx)
+    mean_lv = summed_lv / counts.astype(float)
+    fitted_lv = _pava_non_decreasing(mean_lv, counts.astype(float))
+    pilot_sorted = np.exp(np.repeat(fitted_lv, counts))
+
+    pilot_valid = np.empty_like(lv)
+    pilot_valid[order] = pilot_sorted
+    pilot_flat[valid] = pilot_valid
+    return pilot_flat.reshape(x_arr.shape)
+
+
+def fit_quadratic_variance_with_pilot(
+    x: np.ndarray,
+    v: np.ndarray,
+    pilot_variance: np.ndarray,
+) -> tuple[np.ndarray, dict]:
+    """Fit the quadratic variance model with fixed inverse-pilot-variance weights."""
+    x_arr = np.asarray(x, dtype=float)
+    v_arr = np.asarray(v, dtype=float)
+    pilot_arr = np.asarray(pilot_variance, dtype=float)
+    if x_arr.shape != v_arr.shape or x_arr.shape != pilot_arr.shape:
+        raise ValueError("`x`, `v`, and `pilot_variance` must have the same shape.")
+
+    m = (
+        np.isfinite(x_arr)
+        & np.isfinite(v_arr)
+        & np.isfinite(pilot_arr)
+        & (x_arr > FIT_MIN_SIGNAL)
+        & (v_arr > FIT_MIN_VARIANCE)
+        & (pilot_arr > 0.0)
+    )
+    xx = np.asarray(x_arr[m], dtype=float)
+    vv = np.asarray(v_arr[m], dtype=float)
+    pp = np.asarray(pilot_arr[m], dtype=float)
+    if xx.size < 3:
+        raise RuntimeError(
+            "Not enough valid points for fit; need at least 3 (X,V) pairs "
+            f"with X > {FIT_MIN_SIGNAL:g}, V > {FIT_MIN_VARIANCE:g}, and positive pilot weights."
+        )
+
+    a = np.column_stack([np.ones_like(xx), xx, xx * xx])
+    pilot_floor = max(1e-12, 1e-6 * float(np.median(pp)))
+    scale = np.maximum(pp, pilot_floor)
+    coef = _nnls_3var(a, vv, 1.0 / (scale * scale))
+
+    pred = quadratic_variance_model(xx, coef)
+    rel_resid = (pred - vv) / scale
+    diag = {
+        "relative_rmse": float(np.sqrt(np.mean(rel_resid * rel_resid))),
+        "mean_abs_scaled_error": float(np.mean(np.abs(vv - pred) / scale)),
+        "n_points_used": int(xx.size),
+        "fit_min_signal": float(FIT_MIN_SIGNAL),
+        "fit_min_variance": float(FIT_MIN_VARIANCE),
+        "n_points_excluded": int(np.size(x_arr) - xx.size),
+        "fit_weight_scheme": "fixed_inverse_pilot_variance_sq",
+        "fit_pilot_floor": float(pilot_floor),
+    }
+    return coef, diag
+
+
+def fit_quadratic_variance_with_isotonic_pilot(
+    x: np.ndarray,
+    v: np.ndarray,
+) -> tuple[np.ndarray, dict]:
+    """Fit the quadratic variance model using the isotonic pilot as fixed weights."""
+    pilot_variance = estimate_isotonic_pilot_variance(x, v)
+    coef, diag = fit_quadratic_variance_with_pilot(x, v, pilot_variance)
+    diag["fit_pilot_source"] = "isotonic_log_variance"
+    return coef, diag
+
+
 def collect_centered_d2_pairs(
     tracks: list[tuple[float, np.ndarray, np.ndarray]],
     min_points: int = 5,

@@ -385,6 +385,7 @@ def survey_file(
     path: str | Path,
     *,
     include_fit: bool = True,
+    fit_method: str = "isotonic_pilot",
     mz_bin_width: float = DEFAULT_MZ_BIN_WIDTH,
     min_intensity: float = 0.0,
     min_points: int = 5,
@@ -410,9 +411,11 @@ def survey_file(
         same_scan_aggregation=same_scan_aggregation,
         calibrate_unit_variance=calibrate_unit_variance,
         mz_tolerance_ppm=mz_tolerance_ppm,
+        fit_method=fit_method,
     )
 
     report["fit_settings"] = {
+        "fit_method": fit_method,
         "mz_bin_width_da": float(mz_bin_width),
         "mz_tolerance_ppm": float(mz_tolerance_ppm),
         "min_intensity": float(min_intensity),
@@ -449,6 +452,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--indent", type=int, default=2, help="JSON indentation level.")
     parser.add_argument("--skip-errors", action="store_true", help="Keep going if one file fails.")
     parser.add_argument("--no-fit", action="store_true", help="Skip the variance-fit step.")
+    parser.add_argument("--fit-method", choices=["isotonic_pilot", "irls"], default="isotonic_pilot")
     parser.add_argument("--mz-bin-width", type=float, default=DEFAULT_MZ_BIN_WIDTH)
     parser.add_argument("--mz-tolerance-ppm", type=float, default=DEFAULT_MZ_TOLERANCE_PPM)
     parser.add_argument("--min-intensity", type=float, default=0.0)
@@ -471,6 +475,7 @@ def main() -> None:
                 survey_file(
                     path,
                     include_fit=not bool(args.no_fit),
+                    fit_method=args.fit_method,
                     mz_bin_width=args.mz_bin_width,
                     mz_tolerance_ppm=args.mz_tolerance_ppm,
                     min_intensity=args.min_intensity,

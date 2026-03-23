@@ -175,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite-download", action="store_true")
     parser.add_argument("--overwrite-output", action="store_true")
     parser.add_argument("--no-fit", action="store_true")
+    parser.add_argument("--fit-method", choices=["isotonic_pilot", "irls"], default="isotonic_pilot")
     parser.add_argument("--mz-bin-width", type=float, default=0.001)
     parser.add_argument("--mz-tolerance-ppm", type=float, default=5.0)
     parser.add_argument("--min-intensity", type=float, default=0.0)
@@ -220,6 +221,7 @@ def main() -> None:
     survey = survey_file(
         download["local_path"],
         include_fit=not bool(args.no_fit),
+        fit_method=args.fit_method,
         mz_bin_width=args.mz_bin_width,
         min_intensity=args.min_intensity,
         min_points=args.min_points,
